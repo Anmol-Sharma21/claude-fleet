@@ -178,8 +178,8 @@ big for one task — split it.
 
 ## Verification status
 
-**Boot path: proven.** First end-to-end boot succeeded (fleet `test-fleet`, target
-`~/development/jiya`, cmux 0.64.17). Confirmed working:
+**Boot path: proven.** First end-to-end boot succeeded against a real project on
+cmux 0.64.17. Confirmed working:
 
 - Five Claude Code TUIs boot from a single `workspace create --layout` call —
   manager on Fable, four workers on Opus, no per-pane driving.
