@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Boot a Claude-only agent fleet in cmux: Fable manager + 4 Opus workers.
+
+Boots all five panes at once from claude-fleet.layout.json (manager on the left
+half, worker-1..4 in a 2x2 on the right), colors and labels the workspace, and
+writes <target>/.team/<fleet>.spawn.json so the fleet can be re-found later.
+
+Unlike a 3-tier design, the manager IS a pane -- there is no outside orchestrator
+to exec into. This script boots the fleet and exits; you then talk to the manager
+pane directly.
+
+Usage:
+    ./spawn_claude_fleet.py <fleet-slug> [--cwd DIR] [--env-file PATH]
+    ./spawn_claude_fleet.py <fleet-slug> --close
+
+Requires python3 >= 3.11 and nothing else -- no third-party packages.
+
+Ported from disler/learning-cmux-with-agents (scripts/spawn_fast.py, MIT).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Assets live beside this script, wherever it is installed. Deriving the path from
+# __file__ (rather than assuming ~/.claude/cmux) keeps the whole thing relocatable.
+ASSETS = Path(__file__).resolve().parent
+LAYOUT_FILE = ASSETS / "claude-fleet.layout.json"
+
+ROLES = ["manager", "worker-1", "worker-2", "worker-3", "worker-4"]
+MODELS = {
+    "manager": "fable",
+    "worker-1": "opus",
+    "worker-2": "opus",
+    "worker-3": "opus",
+    "worker-4": "opus",
+}
+UUID_RE = re.compile(r"[0-9a-fA-F-]{36}")
+
+# .team/ is runtime state; make it self-ignoring in whatever repo it lands in.
+TEAM_GITIGNORE = "*\n!.gitignore\n"
+
+
+def die(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def sh(*args: str) -> subprocess.CompletedProcess:
+    """Run a command, capturing stdout/stderr as text. Never raises."""
+    return subprocess.run(list(args), capture_output=True, text=True)
+
+
+def cmux(*args: str) -> subprocess.CompletedProcess:
+    return sh("cmux", *args)
+
+
+def cmux_json(*args: str):
+    out = cmux(*args).stdout.strip()
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return None
+
+
+def slugify(name: str) -> str:
+    """lowercase, spaces -> dashes, keep only [a-z0-9-]."""
+    name = name.lower().replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", name)
+
+
+def ensure_cmux_running() -> None:
+    """Preflight: if the socket is down, launch cmux and wait. Don't stop."""
+    probe = cmux("identify", "--json")
+    if probe.returncode == 0:
+        return
+
+    stderr = (probe.stderr or "") + (probe.stdout or "")
+    socket_missing = "Socket not found" in stderr or "Connection refused" in stderr
+
+    if socket_missing:
+        print("cmux is not running; launching ...", flush=True)
+        sh("open", "-a", "cmux")
+        for _ in range(30):  # poll ~15s
+            time.sleep(0.5)
+            if cmux("identify", "--json").returncode == 0:
+                return
+        probe = cmux("identify", "--json")
+        if probe.returncode == 0:
+            return
+        stderr = (probe.stderr or "") + (probe.stdout or "")
+
+    explain_socket_refusal(stderr)
+
+
+def explain_socket_refusal(stderr: str) -> None:
+    """cmux is up but refused us. Under cmuxOnly, only agents INSIDE cmux may drive it."""
+    inside = bool(os.environ.get("CMUX_SURFACE_ID") or os.environ.get("CMUX_WORKSPACE_ID"))
+    lines = [
+        "cmux refused this connection.",
+        f"  cmux says: {stderr.strip() or '(no message)'}",
+        "",
+    ]
+    if not inside:
+        lines += [
+            "You are running this from a normal terminal, OUTSIDE cmux.",
+            "cmux's automation.socketControlMode defaults to 'cmuxOnly', which only lets",
+            "agents running INSIDE a cmux terminal drive the socket. Two ways forward:",
+            "",
+            "  1. Run this script from inside a cmux terminal (no config change), or",
+            "  2. Allow outside control -- edit ~/.config/cmux/cmux.json:",
+            '         "automation": { "socketControlMode": "allowAll" }',
+            "     then: cmux reload-config",
+        ]
+    else:
+        lines += [
+            "You appear to be inside cmux, so socketControlMode should not be the issue.",
+            "Check `cmux identify --json` by hand.",
+        ]
+    die("\n".join(lines))
+
+
+def build_layout(fleet: str, target: Path) -> str:
+    """Interpolate the layout template and strip its _comment; return compact JSON.
+
+    Substitution happens on the PARSED tree, not the raw text, and paths are
+    shell-quoted. Paths land inside `command` strings that cmux hands to a shell,
+    so a directory with a space (or a quote) would otherwise split the argument
+    and silently misdirect the flag it belongs to.
+    """
+    obj = json.loads(LAYOUT_FILE.read_text())
+    obj.pop("_comment", None)
+
+    subs = {
+        "__FEATURE__": fleet,  # slugified: [a-z0-9-] only, safe bare
+        "__CWD__": shlex.quote(str(target)),
+        "__ASSETS__": shlex.quote(str(ASSETS)),
+    }
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, str):
+            for placeholder, value in subs.items():
+                node = node.replace(placeholder, value)
+            return node
+        return node
+
+    return json.dumps(walk(obj), separators=(",", ":"))
+
+
+def find_or_create_window() -> tuple[str, bool, str | None]:
+    """Reuse the open window (UUID is the only stable handle); create one only if none.
+
+    `--id-format uuids` is a GLOBAL option and must precede the subcommand. cmux
+    output defaults to positional refs, and a ref like `window:1` renumbers -- it
+    would be stale by the time --close reads the spawn file back.
+    """
+    windows = cmux_json("--id-format", "uuids", "list-windows", "--json") or []
+    if not windows:  # older/newer CLI, or --id-format rejected: take what we can get
+        windows = cmux_json("list-windows", "--json") or []
+    win = next((w["id"] for w in windows if w.get("key")), None)
+    if not win and windows:
+        win = windows[0].get("id")
+    if win:
+        if not UUID_RE.fullmatch(str(win)):
+            print(
+                f"warning: window handle '{win}' is a positional ref, not a UUID -- "
+                "it may renumber; --close could miss this fleet.",
+                file=sys.stderr,
+            )
+        return win, False, None
+
+    created = cmux("new-window").stdout  # prints "OK <uuid>", not JSON
+    match = UUID_RE.search(created or "")
+    if not match:
+        die("failed to create a window")
+    win = match.group(0)
+    wslist = cmux_json("workspace", "list", "--window", win, "--json") or {}
+    workspaces = wslist.get("workspaces") or []
+    default_ws = workspaces[0].get("ref") if workspaces else None
+    return win, True, default_ws
+
+
+def prepare_team_dir(fleet: str, target: Path) -> Path:
+    """Create this fleet's private bus under .team/<fleet>/.
+
+    Namespaced per fleet: two fleets pointed at one target would otherwise share
+    <role>.done and requests.md, and this wipe would silently destroy a live
+    fleet's in-flight state.
+    """
+    team = target / ".team"
+    team.mkdir(parents=True, exist_ok=True)
+    gitignore = team / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(TEAM_GITIGNORE)
+
+    bus = team / fleet
+    if bus.exists() and (team / f"{fleet}.spawn.json").exists():
+        die(
+            f"fleet '{fleet}' already has state at {bus}\n"
+            f"  close it first: {Path(__file__).name} {fleet} --close --cwd {target}"
+        )
+    bus.mkdir(parents=True, exist_ok=True)
+
+    # A stale flag from a previous run would read as an instant completion.
+    for role in ROLES:
+        (bus / f"{role}.done").unlink(missing_ok=True)
+    (bus / "requests.md").write_text("")
+    return bus
+
+
+def write_spawn_file(fleet: str, win: str, target: Path) -> Path:
+    """Record the STABLE handle (window UUID) + workspace name. Never surface refs."""
+    spawn = target / ".team" / f"{fleet}.spawn.json"
+    spawn.write_text(
+        json.dumps(
+            {
+                "fleet": fleet,
+                "window": win,
+                "workspace_name": fleet,
+                "cwd": str(target),
+                "bus": str(target / ".team" / fleet),
+                "roles": ROLES,
+                "models": MODELS,
+                "layout": str(LAYOUT_FILE),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return spawn
+
+
+def find_workspace(win: str, name: str) -> str | None:
+    """Locate a fleet's workspace by NAME within its window -- refs renumber, names don't."""
+    wslist = cmux_json("workspace", "list", "--window", win, "--json") or {}
+    for ws in wslist.get("workspaces") or []:
+        if ws.get("custom_title") == name:
+            return ws.get("ref")
+    return None
+
+
+def close_fleet(fleet: str, target: Path) -> None:
+    """Close ONLY this fleet's workspace, located via its spawn file. Never close broadly."""
+    spawn = target / ".team" / f"{fleet}.spawn.json"
+    if not spawn.exists():
+        die(f"no spawn file at {spawn} -- nothing to close")
+    meta = json.loads(spawn.read_text())
+    win, name = meta["window"], meta["workspace_name"]
+
+    ws = find_workspace(win, name)
+    if not ws:
+        print(f"fleet '{fleet}' is not open (no workspace named '{name}' in window {win})")
+        spawn.unlink()
+        return
+
+    cmux("close-workspace", "--workspace", ws, "--window", win)
+    spawn.unlink()
+    print(f"closed fleet '{fleet}' (workspace {ws})")
+
+
+def boot_fleet(fleet: str, target: Path, env_file: Path | None) -> None:
+    layout = build_layout(fleet, target)
+    win, created_win, default_ws = find_or_create_window()
+
+    create_args = [
+        "workspace", "create", "--window", win, "--name", fleet,
+        "--cwd", str(target),
+    ]
+    if env_file:
+        create_args += ["--env-file", str(env_file)]
+    create_args += ["--layout", layout, "--focus", "true", "--json"]
+
+    # Run the create EXACTLY ONCE. `workspace create` boots five agents; re-running
+    # it to harvest an error string would spawn a second fleet before dying.
+    result = cmux(*create_args)
+    try:
+        created = json.loads(result.stdout.strip()) or {}
+    except (json.JSONDecodeError, AttributeError):
+        created = {}
+
+    ws = created.get("workspace_ref")
+    manager = created.get("surface_ref")
+    if not ws or not manager:
+        die(
+            "failed to create the fleet workspace from the layout.\n"
+            f"  cmux said: {(result.stderr or result.stdout or '(nothing)').strip()}"
+        )
+
+    cmux("focus-window", "--window", win)
+    # Only drop the empty default workspace if WE created the window -- sibling
+    # fleets share a window, and closing another one's workspace is unrecoverable.
+    if created_win and default_ws and default_ws != ws:
+        cmux("close-workspace", "--workspace", default_ws)
+
+    cmux("workspace-action", "--action", "set-color", "--workspace", ws, "--color", "Blue")
+    cmux("set-status", "fleet", fleet, "--workspace", ws,
+         "--color", "#3B82F6", "--icon", "bolt.fill")
+
+    spawn = write_spawn_file(fleet, win, target)
+
+    print(f"fleet '{fleet}' up  window={win}  workspace={ws}  manager={manager}")
+    print(f"  target : {target}")
+    print(f"  bus    : {target / '.team' / fleet}")
+    print(f"  spawn  : {spawn}")
+    print(f"  models : manager={MODELS['manager']}  workers={MODELS['worker-1']} x4")
+    print()
+    print("Give the manager pane a job. Close with:")
+    print(f"  {Path(__file__).name} {fleet} --close --cwd {target}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Boot a Claude-only fleet in cmux: Fable manager + 4 Opus workers."
+    )
+    parser.add_argument("fleet", help="fleet slug (dash-case); names the workspace")
+    parser.add_argument("--cwd", default=os.getcwd(),
+                        help="target project the fleet works on (default: cwd)")
+    parser.add_argument("--env-file", default=None,
+                        help="KEY=VALUE file injected into every pane")
+    parser.add_argument("--close", action="store_true",
+                        help="close this fleet's workspace instead of booting it")
+    args = parser.parse_args()
+
+    fleet = slugify(args.fleet)
+    if not fleet:
+        die("usage: spawn_claude_fleet.py <fleet-slug> [--cwd DIR]")
+
+    target = Path(args.cwd).expanduser().resolve()
+    if not target.is_dir():
+        die(f"--cwd is not a directory: {target}")
+
+    env_file = None
+    if args.env_file:
+        env_file = Path(args.env_file).expanduser().resolve()
+        if not env_file.is_file():
+            die(f"--env-file does not exist: {env_file}")
+
+    if not LAYOUT_FILE.is_file():
+        die(f"layout not found: {LAYOUT_FILE}")
+
+    os.environ["CMUX_QUIET"] = "1"
+    ensure_cmux_running()
+
+    if args.close:
+        close_fleet(fleet, target)
+        return
+
+    prepare_team_dir(fleet, target)
+    boot_fleet(fleet, target, env_file)
+
+
+if __name__ == "__main__":
+    main()
