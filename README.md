@@ -94,6 +94,41 @@ If you would rather spawn from a normal terminal, raise the socket mode in
 Note that `allowAll` lets any local process drive your terminals and read screen
 contents.
 
+## Resuming
+
+Agent identity lives in **launch flags, not in the session**.
+`--append-system-prompt-file` and `--effort` are process-level configuration: a
+session resumed without them keeps its conversation memory but loses the pinned
+fleet mechanics, and after enough compaction a bare-resumed manager slowly stops
+being a manager.
+
+So resume with the same flags the layout used. In the manager's pane (its cwd is
+the target project, and sessions are per-directory, so `--continue` finds the
+right one):
+
+```bash
+claude --continue --append-system-prompt-file /path/to/fleet-manager.md
+```
+
+A worker, likewise:
+
+```bash
+claude --continue --effort max --append-system-prompt-file /path/to/fleet-worker.md
+```
+
+Three things make a resumed manager viable by design:
+
+- The in-TUI `/resume` picker keeps the running process's launch flags — that
+  path is always safe. Only a *relaunch* can drop flags.
+- Worker refs are never cached — every dispatch re-resolves them via
+  `cmux tree`, so refs that renumbered while the manager was down cost nothing.
+- The bus path is re-derivable from disk: `.team/<fleet>.spawn.json` in the
+  manager's working directory carries the `bus` field, and the manager prompt
+  tells it so.
+
+Workers catch up from their own `<bus>/<role>.md` notes after a restart — that
+file surviving process death is why the protocol writes it.
+
 ## Files
 
 | File | Role |
@@ -128,7 +163,9 @@ pointed at one target cannot clobber each other's flags. Self-ignoring via
 
 **Boot is one call, not five.** `cmux workspace create --layout` carries each
 pane's `command`, so cmux launches all five agents itself. No send/send-key boot
-loop, no `sleep` gate.
+loop, no `sleep` gate. Workers boot at `--effort max` (deepest reasoning); the
+manager stays on default effort — its job is routing and synthesis, and its
+context budget is the fleet's scarcest resource.
 
 **There is no roster file.** cmux short refs (`surface:3`) are positional and
 renumber as surfaces open and close, so a cached ref goes stale silently. The

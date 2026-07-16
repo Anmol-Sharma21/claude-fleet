@@ -28,7 +28,7 @@
                   {
                     "type": "terminal",
                     "name": "worker-1",
-                    "command": "claude --model opus --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-1 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-1.md and worker-1.done. Reply with one line: ready: worker-1  then wait for the manager to assign work.\""
+                    "command": "claude --model opus --effort max --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-1 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-1.md and worker-1.done. Reply with one line: ready: worker-1  then wait for the manager to assign work.\""
                   }
                 ]
               }
@@ -39,7 +39,7 @@
                   {
                     "type": "terminal",
                     "name": "worker-2",
-                    "command": "claude --model opus --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-2 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-2.md and worker-2.done. Reply with one line: ready: worker-2  then wait for the manager to assign work.\""
+                    "command": "claude --model opus --effort max --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-2 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-2.md and worker-2.done. Reply with one line: ready: worker-2  then wait for the manager to assign work.\""
                   }
                 ]
               }
@@ -56,7 +56,7 @@
                   {
                     "type": "terminal",
                     "name": "worker-3",
-                    "command": "claude --model opus --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-3 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-3.md and worker-3.done. Reply with one line: ready: worker-3  then wait for the manager to assign work.\""
+                    "command": "claude --model opus --effort max --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-3 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-3.md and worker-3.done. Reply with one line: ready: worker-3  then wait for the manager to assign work.\""
                   }
                 ]
               }
@@ -67,7 +67,7 @@
                   {
                     "type": "terminal",
                     "name": "worker-4",
-                    "command": "claude --model opus --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-4 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-4.md and worker-4.done. Reply with one line: ready: worker-4  then wait for the manager to assign work.\""
+                    "command": "claude --model opus --effort max --dangerously-skip-permissions --append-system-prompt-file __ASSETS__/fleet-worker.md \"You are worker-4 on fleet __FEATURE__. Your shared bus is the directory .team/__FEATURE__/ under \\\"__CWD__\\\"; your files there are worker-4.md and worker-4.done. Reply with one line: ready: worker-4  then wait for the manager to assign work.\""
                   }
                 ]
               }

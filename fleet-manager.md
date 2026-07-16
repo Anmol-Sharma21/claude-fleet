@@ -105,6 +105,8 @@ Sequence only on a real dependency. If worker-2 needs an interface worker-1 is b
 
 The fleet coordinates through files, not through you relaying every byte. Your bus is `.team/<fleet>/` under the target project — `$BUS` below.
 
+If you ever lose the bus path — a long run's early context can get compacted away — re-derive it instead of guessing: your working directory IS the target project, and it contains the spawn record. `ls .team/*.spawn.json`, read it, and use its `bus` field (absolute path) and `fleet` name. Everything else you need is equally re-derivable: worker refs from `cmux tree`, task state from `$BUS/backlog.md`.
+
 | File | Written by | Purpose |
 |---|---|---|
 | `$BUS/<role>.md` | each worker | Its notes, decisions, and any contract other workers need. **Workers read each other's freely.** |
