@@ -130,20 +130,40 @@ def explain_socket_refusal(stderr: str) -> None:
     die("\n".join(lines))
 
 
+def dq_escape(s: str) -> str:
+    """Escape a string for interpolation INSIDE a double-quoted shell string.
+
+    Only backslash, double-quote, dollar and backtick are special there; spaces
+    and single quotes are literal. NOT interchangeable with shlex.quote: that
+    emits a standalone quoted word, and dropped inside an existing double-quoted
+    string its quotes shatter it -- a path like "Div's Second Brain" broke every
+    pane command exactly this way.
+    """
+    out = s.replace("\\", "\\\\")
+    for ch in ('"', "$", "`"):
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
 def build_layout(fleet: str, target: Path) -> str:
     """Interpolate the layout template and strip its _comment; return compact JSON.
 
-    Substitution happens on the PARSED tree, not the raw text, and paths are
-    shell-quoted. Paths land inside `command` strings that cmux hands to a shell,
-    so a directory with a space (or a quote) would otherwise split the argument
-    and silently misdirect the flag it belongs to.
+    Substitution happens on the PARSED tree, not the raw text, and each
+    placeholder is escaped for the shell context it lands in:
+
+      __FEATURE__  slug [a-z0-9-], safe in any context
+      __CWD__      lands INSIDE the double-quoted boot prompts -> dq_escape
+      __ASSETS__   lands as a bare argument word -> shlex.quote
+
+    Mixing these up is not cosmetic: the wrong escaping for the wrong context
+    produces a pane command the shell cannot parse, and the agent never boots.
     """
     obj = json.loads(LAYOUT_FILE.read_text())
     obj.pop("_comment", None)
 
     subs = {
-        "__FEATURE__": fleet,  # slugified: [a-z0-9-] only, safe bare
-        "__CWD__": shlex.quote(str(target)),
+        "__FEATURE__": fleet,
+        "__CWD__": dq_escape(str(target)),
         "__ASSETS__": shlex.quote(str(ASSETS)),
     }
 
@@ -211,7 +231,7 @@ def prepare_team_dir(fleet: str, target: Path) -> Path:
     if bus.exists() and (team / f"{fleet}.spawn.json").exists():
         die(
             f"fleet '{fleet}' already has state at {bus}\n"
-            f"  close it first: {Path(__file__).name} {fleet} --close --cwd {target}"
+            f"  close it first: {Path(__file__).name} {fleet} --close --cwd {shlex.quote(str(target))}"
         )
     bus.mkdir(parents=True, exist_ok=True)
 
@@ -319,7 +339,7 @@ def boot_fleet(fleet: str, target: Path, env_file: Path | None) -> None:
     print(f"  models : manager={MODELS['manager']}  workers={MODELS['worker-1']} x4")
     print()
     print("Give the manager pane a job. Close with:")
-    print(f"  {Path(__file__).name} {fleet} --close --cwd {target}")
+    print(f"  {Path(__file__).name} {fleet} --close --cwd {shlex.quote(str(target))}")
 
 
 def main() -> None:

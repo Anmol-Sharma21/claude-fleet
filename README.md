@@ -61,6 +61,17 @@ so it is fine; the spawner is what needs a cmux terminal.
 ./spawn_claude_fleet.py my-fleet --cwd ~/code/some-project
 ```
 
+Paths with spaces or quotes in them are fine — quote them at your shell like
+any other argument:
+
+```bash
+./spawn_claude_fleet.py vault-fleet --cwd "$HOME/Notes/My Second Brain/plugin-project"
+```
+
+A leading `~` works even inside quotes — the spawner expands it itself. Inside
+the panes, the target path reaches every agent wrapped in visible double
+quotes, so spaces and apostrophes survive end to end.
+
 Then talk to the manager pane. Give it a job in plain English; it decomposes,
 dispatches to the four workers in parallel, and reports back.
 
@@ -224,6 +235,10 @@ work. Open:
 - A `BLOCKED:` path — no worker has failed yet.
 - The polling deadline firing on a genuinely dead worker.
 - `--close` teardown against a live fleet.
+- A live boot on a target whose path contains spaces or apostrophes. The
+  original pane-command quoting broke on exactly such a path; the fix is
+  verified against a real shell parse (`sh -c` argv dump) across four path
+  shapes, but the first live boot on one is pending.
 
 **Watch the manager's context.** It carries the cmux mechanics, the roster, the bus
 paths, and every worker's returned state. The manager compacting mid-run — and
