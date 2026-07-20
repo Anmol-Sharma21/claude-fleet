@@ -137,6 +137,7 @@ file surviving process death is why the protocol writes it.
 | `spawn_claude_fleet.py` | Boot + teardown. Zero dependencies. |
 | `fleet-manager.md` | Manager system prompt — all cmux mechanics live here. |
 | `fleet-worker.md` | Shared worker system prompt — role-agnostic; role comes from the boot prompt. |
+| `fleet_dispatch.py` | Verified dispatch: send → settle → Enter → confirm on the worker's screen → recover. Copied onto each fleet's bus as `dispatch.py` at boot. |
 
 These are system-prompt *files* passed via `--append-system-prompt-file`, not
 Claude Code subagents. Keep them out of `~/.claude/agents/` — filing them there
@@ -157,6 +158,7 @@ pointed at one target cannot clobber each other's flags. Self-ignoring via
 | `<fleet>/<role>.done` | each worker | Completion flag: `<role> \| <summary>`. The manager polls these, with a deadline. |
 | `<fleet>/requests.md` | any worker | Cross-worker requests, append-only. The manager drains by **rotating** the file — truncating it would destroy a concurrent append. |
 | `<fleet>/backlog.md` | the manager | Living task list. |
+| `<fleet>/dispatch.py` | the spawner | Verified-dispatch helper; the manager's only sanctioned way to send a task. |
 | `<fleet>.spawn.json` | the spawner | Window handle + workspace name. **No surface refs** — they renumber. |
 
 ## Design decisions worth knowing
@@ -195,6 +197,18 @@ lines or scroll out of the viewport, and a missed sentinel is indistinguishable
 from a worker still thinking. A file either exists or does not. Detection stays on
 files; `read-screen` stays the diagnostic for a silent worker — which is exactly
 what the polling deadline hands it.
+
+**Dispatch is verified, not fire-and-forget.** `cmux send` types a task as one
+rapid burst, which the worker's Claude TUI treats like a paste — and an Enter
+arriving inside that coalescing window is absorbed as a newline instead of a
+submit. The task parks in the worker's input bar; the manager waits forever on a
+worker that was never asked. This failed live, on most dispatches, once worker
+sessions grew heavy. So the manager dispatches only through `dispatch.py`, which
+sends, waits out the paste window, presses Enter, then reads the worker's screen
+to confirm submission — pressing Enter again if the text is parked (harmless if
+it wasn't), and clearing the bar with a single `ctrl+c` before retyping at most
+once. The one thing it never does is blindly resend into a non-empty input bar,
+which would double the task.
 
 **Workers cooperate through files.** A worker that needs something from another
 appends one line to `<bus>/requests.md` and keeps going, rather than blocking.
@@ -276,6 +290,11 @@ work. Open:
   original pane-command quoting broke on exactly such a path; the fix is
   verified against a real shell parse (`sh -c` argv dump) across four path
   shapes, but the first live boot on one is pending.
+- The dispatch helper against live TUIs. The parked-input failure it fixes was
+  observed live (by the end, on most dispatches), and the recovery ladder is
+  tested against a stubbed cmux simulating four worker states — instantly
+  working, parked-then-recovers, parked-forever, fast-finish — but its first
+  live run is pending.
 
 **Watch the manager's context.** It carries the cmux mechanics, the roster, the bus
 paths, and every worker's returned state. The manager compacting mid-run — and

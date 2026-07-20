@@ -28,13 +28,13 @@ Inspect the tree output yourself the first time and confirm the field names befo
 ## The verbs
 
 ```bash
-cmux send        --surface <ref> "<text>"                       # type into a worker
-cmux send-key    --surface <ref> enter                          # submit (send does NOT press Enter)
-cmux read-screen --surface <ref> --scrollback --lines 60        # read its screen
+python3 "$BUS/dispatch.py" --surface <ref> --clear <done-file> "<task>"   # THE dispatch path (verified send)
+cmux read-screen --surface <ref> --scrollback --lines 60        # read a worker's screen
 cmux send-key    --surface <ref> escape                         # interrupt the current turn
-cmux send-key    --surface <ref> ctrl+c                         # harder interrupt
+cmux send-key    --surface <ref> ctrl+c                         # harder interrupt / clear a typed line
 cmux close-surface --surface <ref>                              # destroy the pane (last resort)
 cmux trigger-flash --surface <ref>                              # visually point at one worker
+cmux send / send-key enter                                      # raw typing -- debugging only, never for dispatch
 ```
 
 To stop a worker that is going down the wrong path, **interrupt it** with `send-key escape` (or `ctrl+c`) and then send a corrected task. The pane survives and the worker keeps its context. `close-surface` destroys the pane permanently — there is no respawn, and you would be down a worker for the rest of the run. Reserve it for a pane that is genuinely wedged.
@@ -53,12 +53,22 @@ So a task is **one single-line `send`, followed by one `send-key enter`**.
 
 Every dispatch has four parts on one line: the instruction, the constraints, the verification the worker must pass, and the exact completion protocol to run.
 
+**Dispatch ONLY through the helper on your bus — never with raw `cmux send` + `send-key`:**
+
 ```bash
 S=<worker-1's ref, resolved from cmux tree just now>
-rm -f "$BUS/worker-1.done"                     # clear the flag BEFORE dispatching
-cmux send --surface "$S" "Add a --json flag to the export command in src/cli.py. Constraints: do not touch src/core.py; no new dependencies. Verify: python -m pytest tests/test_cli.py is green. When done: write your notes to $BUS/worker-1.md, then write $BUS/worker-1.done containing one line 'worker-1 | <summary>', then print exactly: WORKER_DONE: worker-1 | <summary>"
-cmux send-key --surface "$S" enter
+python3 "$BUS/dispatch.py" --surface "$S" --clear "$BUS/worker-1.done" "Add a --json flag to the export command in src/cli.py. Constraints: do not touch src/core.py; no new dependencies. Verify: python -m pytest tests/test_cli.py is green. When done: write your notes to $BUS/worker-1.md, then write $BUS/worker-1.done containing one line 'worker-1 | <summary>', then print exactly: WORKER_DONE: worker-1 | <summary>"
 ```
+
+Why this is not optional: `cmux send` types the task as one rapid burst, which the worker's TUI treats like a paste — and an Enter arriving inside that window gets absorbed as a newline instead of a submit. The task then sits parked in the worker's input bar while you wait forever on a worker that was never asked. This happened in production, on most dispatches. The helper owns the whole ritual: it clears the done-flag (`--clear`), sends, waits out the paste window, presses Enter, then **reads the worker's screen to confirm the task actually submitted** — re-pressing Enter if parked, clearing the bar and retyping once if still parked.
+
+Exit codes are your contract with it:
+
+- **0 — delivered.** It saw the worker working, the done-flag appear, or a clean input bar. Move on and poll.
+- **1 — could not deliver after the full recovery ladder.** Do not blindly re-run it. `read-screen` that worker, see what state it is actually in, fix it (an `escape`, a dialog, a dead pane), then dispatch again.
+- **2 — you passed a bad task** (empty, or contains a newline). Fix the task, not the worker.
+
+Never "recover" a parked dispatch by re-sending the text yourself — the text is still sitting in the bar, and a resend doubles it into one corrupted task. That is exactly the mistake the helper's ladder is built to avoid.
 
 `$BUS` is your shared bus directory — `.team/<fleet>/` under the target project, given to you in your boot prompt. Use its absolute path in dispatches; a worker's own cwd is the target project, but being explicit costs nothing and removes a guess.
 
@@ -91,7 +101,7 @@ Do **not** grep the worker's screen to detect completion. A worker's terminal is
 
 Three rules that follow from this:
 
-- **Clear `.done` before every dispatch**, or you will read the previous task's flag instantly and think the new one finished.
+- **Clear `.done` before every dispatch** — pass `--clear "$BUS/<role>.done"` to the helper and it does this for you — or you will read the previous task's flag instantly and think the new one finished.
 - **A `.done` file is not proof of success.** Read `<bus>/<role>.md` and check the worker's claimed verification before you believe it. A worker that hit a wall still writes its flag.
 - **A summary starting with `BLOCKED:` is a worker reporting it could not finish.** That is a real, expected outcome, not a crash. Read its notes for the exact blocker, resolve it — usually by dispatching the dependency to another worker — and re-dispatch. Never treat a `BLOCKED:` flag as completion.
 

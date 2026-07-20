@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -239,6 +240,12 @@ def prepare_team_dir(fleet: str, target: Path) -> Path:
     for role in ROLES:
         (bus / f"{role}.done").unlink(missing_ok=True)
     (bus / "requests.md").write_text("")
+
+    # The manager dispatches ONLY through this helper (send -> settle -> enter
+    # -> verify -> recover). It lives on the bus because the bus path is the
+    # one thing the manager can always re-derive, even after a resume.
+    shutil.copy(ASSETS / "fleet_dispatch.py", bus / "dispatch.py")
+    (bus / "dispatch.py").chmod(0o755)
     return bus
 
 
