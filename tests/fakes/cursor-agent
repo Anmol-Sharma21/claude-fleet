@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Fake Cursor CLI for tests.
+
+Speaks just enough of the real surface verified against cursor-agent
+2026.09.26: `--help`, `--list-models`, and the ACP handshake
+(`initialize`, `cursor/list_available_models`) over newline-delimited JSON-RPC.
+Any other invocation is a pane launch: dump argv + CURSOR_CONFIG_DIR to
+$FAKE_DUMP_DIR and exit.
+
+FAKE_CURSOR_MODE:
+  ok          Opus with an effort parameter (low..max) plus distractor models
+  noauth      every model call answers "Authentication required"
+  nomethod    ACP lacks cursor/list_available_models; --list-models works
+  no_opus     only non-Opus models
+  bool        Opus whose thinking parameter is a boolean
+"""
+import json
+import os
+import sys
+
+MODE = os.environ.get("FAKE_CURSOR_MODE", "ok")
+
+EFFORT = {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select",
+          "currentValue": "high",
+          "options": [{"value": v, "name": v.title()} for v in ("low", "medium", "high", "xhigh", "max")]}
+FAST = {"id": "fast", "name": "Fast", "category": "model_parameter", "type": "select",
+        "currentValue": "false", "options": [{"value": "false", "name": "Off"}, {"value": "true", "name": "On"}]}
+
+
+def models():
+    if MODE == "no_opus":
+        return [
+            {"value": "gpt-5.5", "name": "GPT-5.5", "configOptions": []},
+            {"value": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "configOptions": [EFFORT]},
+        ]
+    if MODE == "bool":
+        think = {"id": "thinking", "name": "Thinking", "category": "thought_level", "type": "select",
+                 "currentValue": "false",
+                 "options": [{"value": "false", "name": "Off"}, {"value": "true", "name": "On"}]}
+        return [{"value": "claude-opus-4-8", "name": "Claude Opus 4.8", "configOptions": [think]}]
+    return [
+        {"value": "auto", "name": "Auto", "configOptions": []},
+        {"value": "gpt-5.5", "name": "GPT-5.5", "configOptions": [EFFORT]},
+        {"value": "composer-2.5", "name": "Composer 2.5", "configOptions": []},
+        {"value": "claude-opus-4-5", "name": "Claude Opus 4.5", "configOptions": [EFFORT]},
+        {"value": "claude-opus-4-8", "name": "Claude Opus 4.8", "configOptions": [EFFORT, FAST]},
+        {"value": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "configOptions": [EFFORT]},
+    ]
+
+
+def acp():
+    for line in sys.stdin:
+        msg = json.loads(line)
+        mid, method = msg.get("id"), msg.get("method")
+        if method == "initialize":
+            out = {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "authMethods": []}}
+        elif method == "cursor/list_available_models" and MODE == "nomethod":
+            out = {"jsonrpc": "2.0", "id": mid,
+                   "error": {"code": -32601, "message": f'"Method not found": {method}'}}
+        elif method == "cursor/list_available_models" and MODE == "noauth":
+            out = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Authentication required"}}
+        elif method == "cursor/list_available_models":
+            # a notification first, to prove the client skips non-responses
+            print(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {}}), flush=True)
+            out = {"jsonrpc": "2.0", "id": mid, "result": {"models": models()}}
+        else:
+            out = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}}
+        print(json.dumps(out), flush=True)
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--help"]:
+        print("Usage: agent [options]\n\nStart the Cursor Agent")
+        return 0
+    if args == ["acp"]:
+        acp()
+        return 0
+    if args == ["--list-models"]:
+        if MODE == "noauth":
+            print("Error: Authentication required. Run 'agent login'", file=sys.stderr)
+            return 1
+        print("Available models\n")
+        for m in models():
+            print(f"\x1b[36m{m['value']}\x1b[0m - {m['name']}")
+        print("\nTip: use --model <id>")
+        return 0
+    dump = os.environ.get("FAKE_DUMP_DIR")
+    if dump:
+        cfg = os.environ.get("CURSOR_CONFIG_DIR", "")
+        name = os.path.basename(cfg) if cfg else "cursor-unknown"
+        with open(os.path.join(dump, f"cursor-{name}.json"), "w") as fh:
+            json.dump({"argv": args, "CURSOR_CONFIG_DIR": cfg, "cwd": os.getcwd()}, fh)
+    return 0
+
+
+sys.exit(main())
