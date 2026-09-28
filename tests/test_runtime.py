@@ -156,14 +156,18 @@ class CursorCase(TempCase):
 
 
 class TestCursorModelSelection(CursorCase):
-    def test_picks_newest_opus_at_max_effort(self):
+    def test_picks_newest_opus_thinking_max(self):
         sel = self.runtime().preflight(self.ctx)
-        self.assertEqual(sel.cli_model, "claude-opus-4-8[effort=max]")
+        # newest version, not -fast, highest level, thinking over non-thinking
+        self.assertEqual(sel.cli_model, "claude-opus-4-8-thinking-max")
         self.assertTrue(sel.thinking_verified)
-        self.assertIn("max", sel.thinking)
-        self.assertIn("low, medium, high, xhigh, max", sel.thinking)
-        self.assertIn("Claude Opus 4.8", sel.display)
-        self.assertIn("cursor/list_available_models", sel.source)
+        self.assertTrue(sel.thinking.startswith("max"))
+        self.assertIn("Claude Opus 4.8 Thinking Max", sel.display)
+        self.assertIn("--list-models", sel.source)
+
+    def test_never_emits_bracketed_ids(self):
+        # the CLI rejects 'id[param=value]' outright: "Cannot use this model"
+        self.assertNotIn("[", self.runtime().preflight(self.ctx).cli_model)
 
     def test_never_selects_non_claude(self):
         sel = self.runtime().preflight(self.ctx)
@@ -171,19 +175,24 @@ class TestCursorModelSelection(CursorCase):
             self.assertNotIn(bad, sel.cli_model.lower())
 
     def test_explicit_model(self):
-        sel = self.runtime(cursor_model="claude-opus-4-5").preflight(self.ctx)
-        self.assertEqual(sel.cli_model, "claude-opus-4-5[effort=max]")
+        sel = self.runtime(cursor_model="claude-opus-4-5-thinking-max").preflight(self.ctx)
+        self.assertEqual(sel.cli_model, "claude-opus-4-5-thinking-max")
+
+    def test_explicit_lower_level_is_reported_as_such(self):
+        sel = self.runtime(cursor_model="claude-opus-4-8-high").preflight(self.ctx)
+        self.assertEqual(sel.cli_model, "claude-opus-4-8-high")
+        self.assertTrue(sel.thinking.startswith("high"))
 
     def test_explicit_non_claude_model_refused(self):
         with self.assertRaisesRegex(fr.RuntimeUnavailable, "not a Claude model"):
-            self.runtime(cursor_model="gpt-5.5").preflight(self.ctx)
+            self.runtime(cursor_model="gpt-5.5-high").preflight(self.ctx)
 
     def test_explicit_unknown_model_refused(self):
         with self.assertRaisesRegex(fr.RuntimeUnavailable, "not in this account"):
-            self.runtime(cursor_model="claude-opus-9").preflight(self.ctx)
+            self.runtime(cursor_model="claude-opus-4-8[effort=max]").preflight(self.ctx)
 
     def test_explicit_claude_non_opus_warns(self):
-        rt = self.runtime(cursor_model="claude-sonnet-4-6")
+        rt = self.runtime(cursor_model="claude-sonnet-4-6-thinking-max")
         rt.preflight(self.ctx)
         self.assertTrue(any("not Opus" in w for w in rt.warnings))
 
@@ -204,34 +213,6 @@ class TestCursorNotLoggedIn(CursorCase):
             self.runtime().preflight(self.ctx)
 
 
-class TestCursorOldCli(CursorCase):
-    mode = "nomethod"
-
-    def test_fallback_to_list_models_is_reported_unverified(self):
-        sel = self.runtime().preflight(self.ctx)
-        self.assertEqual(sel.cli_model, "claude-opus-4-8")  # no params we could not verify
-        self.assertFalse(sel.thinking_verified)
-        self.assertIn("NOT verified", sel.thinking)
-
-
-class TestCursorBooleanThinking(CursorCase):
-    mode = "bool"
-
-    def test_boolean_thinking_turned_on(self):
-        sel = self.runtime().preflight(self.ctx)
-        self.assertEqual(sel.cli_model, "claude-opus-4-8[thinking=true]")
-        self.assertTrue(sel.thinking_verified)
-
-
-class TestThinkingPick(unittest.TestCase):
-    def test_known_levels(self):
-        self.assertEqual(fr.pick_highest_thinking(["low", "high", "medium"]), ("high", True))
-        self.assertEqual(fr.pick_highest_thinking(["max", "xhigh"]), ("max", True))
-
-    def test_unknown_levels_not_claimed_as_max(self):
-        self.assertEqual(fr.pick_highest_thinking(["alpha", "beta"]), ("beta", False))
-
-
 class TestCursorLaunch(CursorCase):
     def setUp(self):
         super().setUp()
@@ -244,7 +225,7 @@ class TestCursorLaunch(CursorCase):
         self.assertEqual(argv[0], "env")
         self.assertEqual(argv[1], f"CURSOR_CONFIG_DIR={self.ctx.bus / 'cursor' / 'worker-1'}")
         self.assertEqual(argv[2], str(FAKES / "cursor-agent"))
-        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8[effort=max]")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8-thinking-max")
         for flag in ("--force", "--trust", "--approve-mcps"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--workspace") + 1], str(self.tmp.target))
@@ -267,7 +248,7 @@ class TestCursorLaunch(CursorCase):
         argv = shlex.split(self.rt.resume("worker-4", self.ctx, session).split(" && ", 1)[1])
         self.assertIn("--continue", argv)
         self.assertEqual(argv[1], f"CURSOR_CONFIG_DIR={self.ctx.bus / 'cursor' / 'worker-4'}")
-        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8[effort=max]")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8-thinking-max")
 
     def test_stop_is_one_ctrl_c(self):
         calls = []

@@ -30,7 +30,9 @@ class TempDirs:
 
     def __init__(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        # resolve(): on macOS the temp dir lives under /var -> /private/var, and
+        # the spawner resolves --cwd, so unresolved paths never match its output.
+        self.root = Path(self._tmp.name).resolve()
         self.target = self.root / "Div's Second Brain" / "plugin project"
         self.target.mkdir(parents=True)
         self.dump = self.root / "dump"

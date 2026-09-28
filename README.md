@@ -83,8 +83,8 @@ Thinking: max (--effort max)
 ```
 Manager: Claude Code (model: fable)
 Workers: Cursor Agent × 4
-Model: Claude Opus 4.8 (claude-opus-4-8)
-Thinking: max -- the highest 'Effort' level Cursor reports for claude-opus-4-8 (options: low, medium, high, xhigh, max); passed as [effort=max]
+Model: Claude Opus 5 1M Max Thinking (claude-opus-5-thinking-max)
+Thinking: max -- named by the Cursor variant id claude-opus-5-thinking-max (extended thinking)
 ```
 
 (The Cursor lines are whatever your account's Cursor CLI actually reports — see
@@ -138,40 +138,33 @@ behaves differently, the preflight fails loudly rather than approximating.
 
 Before anything is created, the spawner runs a **preflight**:
 
-1. It starts `cursor-agent acp` (Cursor's Agent Client Protocol server) and
-   calls its `cursor/list_available_models` extension. That returns every model
-   the account can use **and each model's parameter options**.
-2. It picks the newest model whose id/name says *Opus* and is a Claude model
-   (`--cursor-model <id>` pins an exact one instead; it must be a Claude model
-   the account lists).
+1. It runs `cursor-agent --list-models`. Those flat variant ids (e.g.
+   `claude-opus-5-thinking-max`, `claude-opus-5-high-fast`) are **exactly** the
+   values `--model` accepts.
+2. It picks, among ids that say *Opus* and are Claude models: the newest
+   version, then non-`fast`, then the highest reasoning level in the id, then
+   a `thinking` variant over a plain one. `--cursor-model <id>` pins an exact
+   id instead; it must be a Claude model in that list.
 3. **No Opus → the boot refuses**, lists the Claude models it did see, and
    nothing is written. It never substitutes Sonnet, GPT, Gemini, Composer or
    `auto`. Not logged in → it tells you to run `cursor-agent login`.
 
-The chosen model is passed explicitly on every worker's command line:
-`cursor-agent --model 'claude-opus-4-8[effort=max]' …`.
+The chosen id is passed verbatim on every worker's command line:
+`cursor-agent --model claude-opus-5-thinking-max …`.
 
 ### Thinking: what "max" means here, exactly
 
-Cursor encodes reasoning as a model **parameter**, set with bracket syntax:
-`--model '<id>[<param>=<value>]'`. There is no separate thinking flag.
+Cursor encodes reasoning in the variant id itself: `-thinking-` turns on
+extended thinking and the level suffix (`low` … `xhigh`, `max`) sets effort.
+There is no separate thinking flag.
 
-The trap: if you pass a parameter value the model does not have, Cursor does
-**not** error — it silently "heals" it to the default variant. So the fleet
-never passes a value it has not first seen in the preflight. From the probe it
-takes the model's parameter in Cursor's own `thought_level` category (e.g.
-`effort`) and chooses the highest value by name (`max` > `xhigh` > `high` > …,
-or `true` for an on/off thinking switch). The spawner prints the full option
-list it chose from, so you can see it was the top of what Cursor offered.
-
-It reports honestly when it can't do that:
-
-| Situation | What is passed | What is reported |
-|---|---|---|
-| Model has a thinking/effort parameter | `<id>[<param>=<highest>]` | the value, the options, "highest level Cursor reports" |
-| Model has no such parameter | `<id>` | "model default — Cursor reports no thinking/effort parameter" |
-| Values have unrecognizable names | `<id>[<param>=<last listed>]` | "last listed option … 'maximum' is NOT claimed" |
-| Older CLI without the ACP models method | `<id>` from `--list-models` | "NOT verified — this Cursor CLI does not expose model parameters" |
+`cursor-agent acp` also describes models as a base id plus parameters
+(`claude-opus-5` with `thinking` and `effort` options), which suggests a
+bracket form like `claude-opus-5[effort=max]`. **cursor-agent 2026.09.26
+rejects every bracketed id at launch** ("Cannot use this model: …"), so the
+fleet never builds one. It only passes an id the CLI itself listed, and
+reports the level that id names. An id with no level in its name is reported
+as "model default", never as max.
 
 ### Subagents
 
@@ -262,7 +255,7 @@ jq -r '."worker-2".claude.resume' .team/my-fleet/sessions.json
 # cd '/path/proj' && claude --resume <uuid> --model opus --effort max --dangerously-skip-permissions --append-system-prompt-file /path/to/fleet-worker.md
 
 jq -r '."worker-2".cursor.resume' .team/my-fleet/sessions.json
-# cd '/path/proj' && env CURSOR_CONFIG_DIR=/path/proj/.team/my-fleet/cursor/worker-2 cursor-agent --model 'claude-opus-4-8[effort=max]' --force --trust --approve-mcps --workspace /path/proj --continue
+# cd '/path/proj' && env CURSOR_CONFIG_DIR=/path/proj/.team/my-fleet/cursor/worker-2 cursor-agent --model claude-opus-5-thinking-max --force --trust --approve-mcps --workspace /path/proj --continue
 ```
 
 Resuming private history is a convenience. A fresh worker recovers everything
@@ -315,6 +308,7 @@ pointed at one target cannot clobber each other's flags. Self-ignoring via
 | `<fleet>/requests.md` | any worker | Cross-worker requests, append-only. The manager drains by **rotating** the file — truncating it would destroy a concurrent append. Survives restarts. |
 | `<fleet>/dispatch.py` | the spawner | Verified-dispatch helper; the manager's only sanctioned way to send a task or interrupt a worker. |
 | `<fleet>/worker-instructions.md` | the spawner | Copy of `fleet-worker.md` inside the workspace (Cursor workers read it). |
+| `<fleet>/launch/<pane>.sh` | the spawner | Each pane's full launch command. The pane itself only runs `sh <script>`: cmux types pane commands before the shell's line editor is up, and macOS drops anything past 1024 bytes of such a line (Enter included), which left long boot commands stuck unrun at the prompt. Rewritten on every boot. |
 | `<fleet>/runtime.json`, `sessions.json`, `runtime-history.log`, `cursor/` | the spawner | Worker-runtime bookkeeping — see [Switching runtimes](#switching-runtimes). |
 | `<fleet>.spawn.json` | the spawner | Window handle + workspace name + manager/worker runtime. **No surface refs** — they renumber. |
 
@@ -326,7 +320,7 @@ completion). Everything else on the bus is fleet context and is kept.
 **Boot is one call, not five.** `cmux workspace create --layout` carries each
 pane's `command`, so cmux launches all five agents itself. No send/send-key boot
 loop, no `sleep` gate. Workers boot at their runtime's deepest reasoning
-(`--effort max` for Claude Code; the highest reported `thought_level` for
+(`--effort max` for Claude Code; the highest-level listed Opus variant for
 Cursor); the manager stays on Fable at default effort — its job is routing and
 synthesis, and its context budget is the fleet's scarcest resource. `--cwa`
 never changes that.

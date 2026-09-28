@@ -56,6 +56,7 @@ LAYOUT_FILE = ASSETS / "claude-fleet.layout.json"
 ROLES = ["manager", *WORKER_ROLES]
 MANAGER_MODEL = "fable"  # the manager is ALWAYS Claude Code; --cwa never touches it
 WORKER_COMMAND = "__WORKER_COMMAND__"  # layout placeholder, filled by the worker runtime
+LAUNCH_DIR = "launch"  # under the bus: one script per pane, holding its full command
 UUID_RE = re.compile(r"[0-9a-fA-F-]{36}")
 
 # .team/ is runtime state; make it self-ignoring in whatever repo it lands in.
@@ -220,6 +221,34 @@ def build_layout(fleet: str, target: Path, worker_commands: dict[str, str]) -> s
     return json.dumps(tree, separators=(",", ":"))
 
 
+def stage_launch_scripts(layout: str, bus: Path) -> str:
+    """Move every pane command into <bus>/launch/<name>.sh; the pane runs `sh <script>`.
+
+    cmux types each pane command into the new shell before its line editor is
+    up. In that canonical tty mode macOS keeps at most MAX_CANON (1024) bytes
+    of a line and silently drops the rest -- Enter included -- so a longer
+    command sits truncated at the prompt and the agent never boots. The boot
+    prompts alone approach that limit, so no pane command is typed inline.
+    `exec` makes the agent replace the wrapper shell, so interrupts reach the
+    agent directly and quitting it returns to the pane's own shell as before.
+    """
+    launch_dir = bus / LAUNCH_DIR
+    launch_dir.mkdir(parents=True, exist_ok=True)
+
+    def stage(node):
+        if isinstance(node, dict):
+            if "command" in node and "name" in node:
+                script = launch_dir / f"{node['name']}.sh"
+                script.write_text(f"#!/bin/sh\nexec {node['command']}\n")
+                node = {**node, "command": f"sh {shlex.quote(str(script))}"}
+            return {k: stage(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [stage(v) for v in node]
+        return node
+
+    return json.dumps(stage(json.loads(layout)), separators=(",", ":"))
+
+
 def find_or_create_window() -> tuple[str, bool, str | None]:
     """Reuse the open window (UUID is the only stable handle); create one only if none.
 
@@ -350,7 +379,7 @@ def boot_fleet(fleet: str, target: Path, env_file: Path | None,
                runtime: WorkerRuntime, ctx: FleetContext) -> None:
     sessions = {role: runtime.new_session(role, ctx) for role in WORKER_ROLES}
     commands = {role: runtime.launch(role, ctx, sessions[role]) for role in WORKER_ROLES}
-    layout = build_layout(fleet, target, commands)
+    layout = stage_launch_scripts(build_layout(fleet, target, commands), ctx.bus)
     win, created_win, default_ws = find_or_create_window()
 
     create_args = [

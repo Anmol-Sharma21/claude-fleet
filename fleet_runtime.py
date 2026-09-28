@@ -25,12 +25,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import select
 import shlex
 import shutil
 import subprocess
 import sys
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -311,28 +309,17 @@ def _version_key(text: str) -> tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", text)[:4])
 
 
-def pick_highest_thinking(values: list[str]) -> tuple[str, bool]:
-    """Return (value, known). known=False means no value was recognizable."""
-    known = [v for v in values if v.lower() in THINKING_RANK]
-    if known:
-        return max(known, key=lambda v: THINKING_RANK[v.lower()]), True
-    return values[-1], False
-
-
 class CursorWorkerRuntime(WorkerRuntime):
     """Cursor Agent workers, pinned to Claude Opus at the highest reasoning level
-    the installed CLI reports for it.
+    this account's Cursor CLI offers for it.
 
-    Verified against cursor-agent 2026.09.26 (see README, "Cursor workers"):
+    Verified live against cursor-agent 2026.09.26 (see README, "Cursor workers"):
 
-    * `--model 'id[param=value]'` selects a model variant. Invalid ids or
-      values are SILENTLY healed to the default variant, so we never pass a
-      value the CLI did not first report as valid.
-    * `cursor-agent acp` answers the `cursor/list_available_models` extension
-      with every model and its parameter options; options in the
-      "thought_level" category are the reasoning setting. That is the probe.
-    * Older CLIs without that method: fall back to `--list-models`, pick the
-      Opus id, and report thinking as NOT verified.
+    * `--model` accepts ONLY the flat variant ids `--list-models` prints, e.g.
+      `claude-opus-5-thinking-max`. The reasoning level is part of the id.
+      Bracketed `id[param=value]` forms (as `cursor-agent acp` would suggest)
+      are rejected at launch with "Cannot use this model", so the fleet never
+      builds one: the launch id is always taken verbatim from that list.
     * There is no public system-prompt flag, so the worker is told to read
       fleet-worker.md (copied onto the bus) as its first action.
     * CURSOR_CONFIG_DIR relocates cli-config.json and the chat store (auth and
@@ -394,90 +381,8 @@ class CursorWorkerRuntime(WorkerRuntime):
         return Path.home() / ".cursor"
 
     # -- model probe -------------------------------------------------------- #
-    def probe_models_acp(self, cwd: Path) -> list[dict] | None:
-        """Ask `cursor-agent acp` for models + parameter options.
-
-        Returns None when this CLI has no such method (caller falls back).
-        Raises RuntimeUnavailable on auth failure or a dead CLI.
-        """
-        try:
-            proc = subprocess.Popen([self.binary, "acp"], cwd=str(cwd), stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        except OSError as exc:
-            raise RuntimeUnavailable(f"could not start `{self.binary} acp`: {exc}") from exc
-
-        assert proc.stdin is not None and proc.stdout is not None  # both are PIPEs
-        stdin, stdout = proc.stdin, proc.stdout
-        deadline = time.monotonic() + self.PROBE_TIMEOUT
-        fd = stdout.fileno()
-        pending = b""  # raw bytes read but not yet split into lines
-
-        def call(msg_id: int, method: str, params: dict) -> dict:
-            nonlocal pending
-            stdin.write((json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": method,
-                                          "params": params}) + "\n").encode())
-            stdin.flush()
-            while True:
-                # Drain complete lines first. Raw os.read + our own splitting:
-                # select() on a BUFFERED reader misses lines already in its buffer.
-                while b"\n" in pending:
-                    line, pending = pending.split(b"\n", 1)
-                    try:
-                        msg = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(msg, dict) and msg.get("id") == msg_id and "method" not in msg:
-                        return msg
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeUnavailable(
-                        f"`{self.binary} acp` did not answer {method} within {self.PROBE_TIMEOUT:.0f}s")
-                ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
-                if ready:
-                    chunk = os.read(fd, 65536)
-                    if not chunk:
-                        raise RuntimeUnavailable(f"`{self.binary} acp` exited during {method}")
-                    pending += chunk
-
-        try:
-            init = call(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {},
-                                          "clientInfo": {"name": "claude-fleet", "version": "1"}})
-            if "error" in init:
-                raise RuntimeUnavailable(f"cursor ACP initialize failed: {init['error']}")
-            resp = call(2, "cursor/list_available_models", {})
-        finally:
-            proc.kill()
-            proc.wait()
-            stdin.close()
-            stdout.close()
-
-        err = resp.get("error")
-        if err:
-            text = json.dumps(err)
-            if err.get("code") == -32601 or "Method not found" in text:
-                return None
-            if "uthenticat" in text:
-                raise RuntimeUnavailable(
-                    "Cursor CLI is not logged in, so it cannot list models.\n"
-                    f"  run: {Path(self.binary).name} login   (or set CURSOR_API_KEY)")
-            raise RuntimeUnavailable(f"Cursor model listing failed: {err.get('message', text)}")
-
-        models = []
-        for m in (resp.get("result") or {}).get("models") or []:
-            options = []
-            for opt in m.get("configOptions") or []:
-                options.append({
-                    "id": opt.get("id", ""),
-                    "name": opt.get("name", ""),
-                    "category": opt.get("category", ""),
-                    "current": opt.get("currentValue"),
-                    "values": [o.get("value") for o in opt.get("options") or [] if o.get("value")],
-                })
-            models.append({"id": m.get("value", ""), "name": m.get("name", ""), "options": options})
-        return models
-
     def probe_models_list(self, cwd: Path) -> list[dict]:
-        """Fallback: parse `cursor-agent --list-models` (ids + names, no parameters)."""
+        """Parse `cursor-agent --list-models`: exactly the ids `--model` accepts."""
         try:
             r = subprocess.run([self.binary, "--list-models"], cwd=str(cwd), capture_output=True,
                                text=True, timeout=self.PROBE_TIMEOUT)
@@ -503,7 +408,7 @@ class CursorWorkerRuntime(WorkerRuntime):
         return models
 
     # -- selection ---------------------------------------------------------- #
-    def select_model(self, models: list[dict], verified_params: bool) -> ModelSelection:
+    def select_model(self, models: list[dict]) -> ModelSelection:
         if not models:
             raise RuntimeUnavailable("Cursor reported no models for this account.")
 
@@ -534,46 +439,26 @@ class CursorWorkerRuntime(WorkerRuntime):
                 text = (m["id"] + " " + m["name"]).lower()
                 level = max((THINKING_RANK[t] for t in re.split(r"[^a-z]+", text) if t in THINKING_RANK),
                             default=-1)
-                return (_version_key(m["id"]), "fast" not in text, "thinking" in text, level)
+                return (_version_key(m["id"]), "fast" not in text, level, "thinking" in text)
 
             chosen = max(candidates, key=rank)
 
-        return self._thinking_for(chosen, verified_params)
+        return self._thinking_for(chosen)
 
-    def _thinking_for(self, model: dict, verified_params: bool) -> ModelSelection:
+    def _thinking_for(self, model: dict) -> ModelSelection:
+        """The reasoning level is encoded in the variant id itself."""
         mid = model["id"]
-        display = f"{model['name'] or mid} ({mid})" if model["name"] != mid else mid
-        thought = [o for o in model["options"] if o["category"] == "thought_level" and o["values"]]
-        if thought:
-            opt = thought[0]
-            value, known = pick_highest_thinking(opt["values"])
-            listed = ", ".join(opt["values"])
-            if not re.fullmatch(r"[A-Za-z0-9._-]+", opt["id"]) or not re.fullmatch(r"[A-Za-z0-9._-]+", value):
-                raise RuntimeUnavailable(f"unexpected Cursor parameter syntax: {opt['id']}={value}")
-            thinking = (f"{value} -- the highest '{opt['name'] or opt['id']}' level Cursor reports for {mid} "
-                        f"(options: {listed}); passed as [{opt['id']}={value}]")
-            notes = []
-            if not known:
-                thinking = (f"{value} -- last listed '{opt['id']}' option for {mid} (options: {listed}); "
-                            "none of the names are recognizable levels, so 'maximum' is NOT claimed")
-                notes.append("thinking level chosen by list order, not by name")
-            return ModelSelection(cli_model=f"{mid}[{opt['id']}={value}]", display=display,
-                                  thinking=thinking, thinking_verified=known,
-                                  source="cursor-agent acp: cursor/list_available_models", notes=notes)
-
-        if verified_params:
-            thinking = (f"model default -- Cursor reports no thinking/effort parameter for {mid}"
-                        + ("; the id itself names a thinking variant" if "thinking" in mid.lower() else ""))
-            return ModelSelection(cli_model=mid, display=display, thinking=thinking,
-                                  thinking_verified=True,
-                                  source="cursor-agent acp: cursor/list_available_models")
-
-        thinking = ("NOT verified -- this Cursor CLI does not expose model parameters; "
-                    + (f"'{mid}' is named as a thinking variant" if "thinking" in mid.lower()
-                       else f"'{mid}' runs at its default reasoning level"))
-        return ModelSelection(cli_model=mid, display=display, thinking=thinking, thinking_verified=False,
-                              source="cursor-agent --list-models (fallback; no parameter info)",
-                              notes=["upgrade the Cursor CLI (`cursor-agent update`) for verified thinking selection"])
+        display = f"{model['name'] or mid} ({mid})" if model["name"] and model["name"] != mid else mid
+        levels = [t for t in re.split(r"[^a-z]+", mid.lower()) if t in THINKING_RANK]
+        mode = "extended thinking" if "thinking" in mid.lower() else "no extended thinking"
+        if levels:
+            level = max(levels, key=THINKING_RANK.__getitem__)
+            thinking = f"{level} -- named by the Cursor variant id {mid} ({mode})"
+        else:
+            thinking = f"model default -- the Cursor variant id {mid} names no reasoning level ({mode})"
+        return ModelSelection(cli_model=mid, display=display, thinking=thinking,
+                              thinking_verified=bool(levels),
+                              source="cursor-agent --list-models (the ids --model accepts)")
 
     @staticmethod
     def _claude_ids(models: list[dict]) -> str:
@@ -581,11 +466,7 @@ class CursorWorkerRuntime(WorkerRuntime):
 
     def preflight(self, ctx: FleetContext) -> ModelSelection:
         _ = self.binary  # raises RuntimeUnavailable if missing
-        models = self.probe_models_acp(ctx.target)
-        verified = models is not None
-        if models is None:
-            models = self.probe_models_list(ctx.target)
-        self.selection = self.select_model(models, verified_params=verified)
+        self.selection = self.select_model(self.probe_models_list(ctx.target))
         self.warnings.extend(scan_subagent_definitions(ctx.target))
         return self.selection
 

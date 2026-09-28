@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from helpers import REPO, TempDirs, fake_env
 
@@ -105,7 +106,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Manager: Claude Code (model: fable)", r.stdout)
         self.assertIn("Workers: Cursor Agent × 4", r.stdout)
-        self.assertIn("Model: Claude Opus 4.8 (claude-opus-4-8)", r.stdout)
+        self.assertIn("Model: Claude Opus 4.8 Thinking Max (claude-opus-4-8-thinking-max)", r.stdout)
         self.assertIn("Thinking: max", r.stdout)
         cursor_panes = self.surfaces()
         self.assertEqual(cursor_panes["manager"], claude_panes["manager"])  # manager untouched
@@ -115,7 +116,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(len(cursor_dumps), 4)
         for p in cursor_dumps:
             argv = json.loads(p.read_text())["argv"]
-            self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8[effort=max]")
+            self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8-thinking-max")
             prompt = argv[-1]
             self.assertIn(str(self.bus / fr.INSTRUCTIONS_FILE), prompt)
             self.assertIn("The bus is the source of truth", prompt)
@@ -126,7 +127,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("need the export schema", (self.bus / "requests.md").read_text())
         self.assertIn("goal", (self.bus / "manager.md").read_text())
         profile = json.loads((self.bus / fr.RUNTIME_FILE).read_text())
-        self.assertEqual((profile["runtime"], profile["cli_model"]), ("cursor", "claude-opus-4-8[effort=max]"))
+        self.assertEqual((profile["runtime"], profile["cli_model"]), ("cursor", "claude-opus-4-8-thinking-max"))
 
         # ---- the task moves from worker-1 to worker-3 ------------------- #
         (self.bus / "backlog.md").write_text("- [T1] worker-3 | in-progress | add --json to export\n")
@@ -167,8 +168,21 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         for name, cmd in self.surfaces().items():
             if name.startswith("worker-"):
-                argv = shlex.split(cmd)
+                script = Path(shlex.split(cmd)[-1])
+                argv = shlex.split(script.read_text().splitlines()[-1])
                 self.assertIn(f"under \"{self.tmp.target}\"", argv[-1])
+
+    def test_pane_commands_fit_the_tty_line_limit(self):
+        # cmux types each pane command before the shell's line editor is up. In
+        # that canonical tty mode macOS keeps at most MAX_CANON (1024) bytes of a
+        # line and drops the rest, Enter included, so a longer command is left
+        # truncated at the prompt and never runs.
+        for extra in ((), ("--cwa",)):
+            r = self.spawn(*extra)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, cmd in self.surfaces().items():
+                self.assertLess(len(cmd.encode()), 1024, f"{name}: {cmd[:80]}...")
+            self.assertEqual(self.spawn("--close").returncode, 0)
 
 
 if __name__ == "__main__":
